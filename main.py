@@ -32,7 +32,7 @@ limiter = Limiter(key_func=get_remote_address)
 app = FastAPI(
     title="PDF Generator API",
     description="Genera facturas PDF profesionales desde JSON. 52 monedas, impuestos configurables, soporte multi-país.",
-    version="1.3.0",
+    version="1.3.1",
     docs_url="/docs",
     redoc_url="/redoc",
 )
@@ -141,7 +141,6 @@ class LineItem(BaseModel):
 
 
 class IssuerData(BaseModel):
-    """Datos del emisor de la factura."""
     model_config = ConfigDict(str_strip_whitespace=True)
 
     name: Optional[str] = Field(None, max_length=MAX_STR_LEN)
@@ -231,9 +230,20 @@ def _normalize_date(v: Optional[str]) -> str:
     return v
 
 
-# ==================== GENERADOR v1.3.0 ====================
+def _hrule(width, color, thickness):
+    t = Table([[""]], colWidths=[width], rowHeights=[thickness])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), color),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 0),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
+    ]))
+    return t
 
-# Paleta
+
+# ==================== GENERADOR ====================
+
 COLOR_PRIMARY = colors.HexColor("#0f172a")
 COLOR_ACCENT = colors.HexColor("#3b82f6")
 COLOR_LIGHT = colors.HexColor("#f8fafc")
@@ -261,7 +271,12 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
 
     PAGE_W = A4[0] - 2 * MARGIN
 
-    # ---- Estilos base ----
+    # Grilla compartida: 45% / 55% con offset interno en la columna derecha
+    LEFT_COL = PAGE_W * 0.45
+    RIGHT_COL = PAGE_W * 0.55
+    RIGHT_X_OFFSET = 10  # puntos de margen interno del bloque derecho
+
+    # ---- Estilos ----
     styles = getSampleStyleSheet()
 
     s_title = ParagraphStyle(
@@ -322,11 +337,12 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
     invoice_date = _normalize_date(data.date)
 
     # ================================================================
-    # BLOQUE 1: HEADER (título izq + emisor der)
+    # BLOQUE 1: HEADER (título izq + emisor der, mismo X que detalles)
     # ================================================================
-    # Columna izquierda: título + número de factura en subtítulo
-    left_parts = [Paragraph(_escape(data.title.upper()), s_title)]
-    left_table = Table([[p] for p in left_parts], colWidths=[PAGE_W * 0.5])
+    left_table = Table(
+        [[Paragraph(_escape(data.title.upper()), s_title)]],
+        colWidths=[LEFT_COL],
+    )
     left_table.setStyle(TableStyle([
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
@@ -335,7 +351,6 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ]))
 
-    # Columna derecha: emisor (si existe)
     has_issuer = bool(
         data.issuer and any([
             data.issuer.name, data.issuer.tax_id, data.issuer.address,
@@ -357,41 +372,40 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
         if iss.phone:
             issuer_rows.append([Paragraph(_escape(iss.phone), s_body_sm)])
 
-        right_table = Table(issuer_rows, colWidths=[PAGE_W * 0.5])
+        right_table = Table(issuer_rows, colWidths=[RIGHT_COL - RIGHT_X_OFFSET])
         right_table.setStyle(TableStyle([
             ("LEFTPADDING", (0, 0), (-1, -1), 0),
             ("RIGHTPADDING", (0, 0), (-1, -1), 0),
             ("TOPPADDING", (0, 0), (-1, -1), 1),
             ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
-            ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+            ("ALIGN", (0, 0), (-1, -1), "LEFT"),
             ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ]))
     else:
-        # Placeholder vacío para mantener simetría
-        right_table = Table([[""]], colWidths=[PAGE_W * 0.5])
+        right_table = Table([[""]], colWidths=[RIGHT_COL - RIGHT_X_OFFSET])
 
     header = Table(
         [[left_table, right_table]],
-        colWidths=[PAGE_W * 0.5, PAGE_W * 0.5],
+        colWidths=[LEFT_COL, RIGHT_COL],
     )
     header.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("LEFTPADDING", (0, 0), (0, 0), 0),
+        ("RIGHTPADDING", (0, 0), (0, 0), 0),
+        ("LEFTPADDING", (1, 0), (1, 0), RIGHT_X_OFFSET),
+        ("RIGHTPADDING", (1, 0), (1, 0), 0),
         ("TOPPADDING", (0, 0), (-1, -1), 0),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
     ]))
     elements.append(header)
     elements.append(Spacer(1, 10))
 
-    # Línea divisoria fina
     elements.append(_hrule(PAGE_W, COLOR_BORDER_STRONG, 0.6))
     elements.append(Spacer(1, 22))
 
     # ================================================================
-    # BLOQUE 2: CLIENTE (izq) + DETALLES FACTURA (der)
+    # BLOQUE 2: CLIENTE (izq) + DETALLES (der, mismo X que emisor)
     # ================================================================
-    # --- Cliente ---
     client_rows = [[Paragraph("FACTURAR A", s_section)]]
     client_rows.append([Paragraph(_escape(data.client_name), s_client_name)])
     if data.client_tax_id:
@@ -402,7 +416,7 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
     if data.client_email:
         client_rows.append([Paragraph(_escape(data.client_email), s_body_sm)])
 
-    client_table = Table(client_rows, colWidths=[PAGE_W * 0.5 - 8])
+    client_table = Table(client_rows, colWidths=[LEFT_COL])
     client_table.setStyle(TableStyle([
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
@@ -411,8 +425,6 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ]))
 
-    # --- Detalles de factura ---
-    # Formato de fila "etiqueta: valor" alineado a la izquierda
     detail_rows = [[Paragraph("DETALLES DE LA FACTURA", s_section)]]
     detail_items = [
         ("No.", data.invoice_number),
@@ -427,24 +439,25 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
             Paragraph(f"<b>{_escape(lbl)}:</b> {_escape(val)}", s_detail)
         ])
 
-    detail_table = Table(detail_rows, colWidths=[PAGE_W * 0.5 - 8])
+    detail_table = Table(detail_rows, colWidths=[RIGHT_COL - RIGHT_X_OFFSET])
     detail_table.setStyle(TableStyle([
         ("LEFTPADDING", (0, 0), (-1, -1), 0),
         ("RIGHTPADDING", (0, 0), (-1, -1), 0),
         ("TOPPADDING", (0, 0), (-1, -1), 1),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ALIGN", (0, 0), (-1, -1), "LEFT"),
     ]))
 
     info_row = Table(
         [[client_table, detail_table]],
-        colWidths=[PAGE_W * 0.5, PAGE_W * 0.5],
+        colWidths=[LEFT_COL, RIGHT_COL],
     )
     info_row.setStyle(TableStyle([
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
         ("LEFTPADDING", (0, 0), (0, 0), 0),
-        ("RIGHTPADDING", (0, 0), (0, 0), 8),
-        ("LEFTPADDING", (1, 0), (1, 0), 8),
+        ("RIGHTPADDING", (0, 0), (0, 0), 0),
+        ("LEFTPADDING", (1, 0), (1, 0), RIGHT_X_OFFSET),
         ("RIGHTPADDING", (1, 0), (1, 0), 0),
     ]))
     elements.append(info_row)
@@ -476,7 +489,6 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
 
     subtotal = round(subtotal, 2)
 
-    # Cálculos de impuesto
     show_tax = data.tax_rate > 0
     if data.tax_included:
         tax_amount = round(subtotal - (subtotal / (1 + data.tax_rate)), 2)
@@ -507,12 +519,11 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, COLOR_LIGHT]),
     ]))
     elements.append(items_table)
-
-    # ================================================================
-    # BLOQUE 4: TOTALES (alineados a la derecha, sin huecos)
-    # ================================================================
     elements.append(Spacer(1, 4))
 
+    # ================================================================
+    # BLOQUE 4: TOTALES
+    # ================================================================
     totals_w = PAGE_W * 0.42
 
     total_rows: list = []
@@ -555,18 +566,15 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
         ("RIGHTPADDING", (0, 0), (-1, -1), 10),
         ("LINEABOVE", (0, 0), (-1, 0), 0.5, COLOR_BORDER_STRONG),
     ]
-    # Fila TOTAL destacada
     tr = len(rendered) - 1
     style_cmds.extend([
         ("BACKGROUND", (0, tr), (-1, tr), COLOR_PRIMARY),
         ("TOPPADDING", (0, tr), (-1, tr), 10),
         ("BOTTOMPADDING", (0, tr), (-1, tr), 10),
         ("LINEABOVE", (0, tr), (-1, tr), 0, colors.white),
-        ("LINEBEFORE", (0, tr), (0, tr), 0, colors.white),
     ])
     totals_table.setStyle(TableStyle(style_cmds))
 
-    # Envolver para alinear a la derecha
     totals_wrapper = Table(
         [["", totals_table]],
         colWidths=[PAGE_W - totals_w, totals_w],
@@ -581,7 +589,7 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
     elements.append(totals_wrapper)
 
     # ================================================================
-    # BLOQUE 5: NOTAS (solo si existen)
+    # BLOQUE 5: NOTAS
     # ================================================================
     if data.notes:
         elements.append(Spacer(1, 24))
@@ -613,26 +621,13 @@ def generate_invoice_pdf(data: InvoiceRequest) -> bytes:
     return buffer.getvalue()
 
 
-def _hrule(width, color, thickness):
-    """Devuelve una línea horizontal como Table de 1 fila."""
-    t = Table([[""]], colWidths=[width], rowHeights=[thickness])
-    t.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), color),
-        ("LEFTPADDING", (0, 0), (-1, -1), 0),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
-        ("TOPPADDING", (0, 0), (-1, -1), 0),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 0),
-    ]))
-    return t
-
-
 # ==================== ENDPOINTS ====================
 
 @app.get("/")
 def root():
     return {
         "service": "PDF Generator API",
-        "version": "1.3.0",
+        "version": "1.3.1",
         "docs": "/docs",
         "health": "/health",
         "currencies": "/currencies",
@@ -642,7 +637,7 @@ def root():
 
 @app.get("/health")
 def health_check():
-    return {"status": "healthy", "service": "pdf-generator-api", "version": "1.3.0"}
+    return {"status": "healthy", "service": "pdf-generator-api", "version": "1.3.1"}
 
 
 @app.get("/currencies")
@@ -678,7 +673,7 @@ def create_invoice(request: Request, data: InvoiceRequest):
             headers={
                 "Content-Disposition": f'attachment; filename="{filename}"',
                 "Content-Length": str(len(pdf_bytes)),
-                "X-Generated-By": "PDF-Generator-API/1.3.0",
+                "X-Generated-By": "PDF-Generator-API/1.3.1",
                 "X-Currency": data.currency,
                 "Cache-Control": "no-store",
             },
